@@ -1,68 +1,61 @@
-import axios from "axios";
 import crypto from "crypto";
+import axios from "axios";
+import config from "./config.js";
 
-const API = "https://api.bitkub.com";
-const KEY = process.env.BITKUB_API_KEY;
-const SECRET = process.env.BITKUB_API_SECRET;
+const BASE = "https://api.bitkub.com";
 
-function sign(str) {
-  return crypto.createHmac("sha256", SECRET).update(str).digest("hex");
+function sign(payload) {
+  return crypto
+    .createHmac("sha256", config.BITKUB_API_SECRET)
+    .update(JSON.stringify(payload))
+    .digest("hex");
 }
 
-export async function getPrice(symbol) {
-  const res = await axios.get(`${API}/api/market/ticker`);
-  return res.data[symbol].last;
+export async function getPrice() {
+  const res = await axios.get(`${BASE}/api/market/ticker`);
+  return res.data[config.SYMBOL].last;
 }
 
-export async function getBalance() {
-  const ts = Date.now();
-  const payload = `ts=${ts}`;
-  const sig = sign(payload);
+export async function placeOrder(type, amount, rate) {
+  const payload = {
+    sym: config.SYMBOL,
+    amt: amount,
+    rat: rate,
+    typ: type,
+    ts: Date.now()
+  };
+
+  payload.sig = sign(payload);
 
   const res = await axios.post(
-    `${API}/api/market/bal`,
-    payload + `&sig=${sig}`,
-    { headers: { "X-BTK-APIKEY": KEY } }
+    `${BASE}/api/market/place-${type}`,
+    payload,
+    { headers: { "X-BTK-APIKEY": config.BITKUB_API_KEY } }
   );
-  return res.data.result;
-}
 
-export async function placeOrder(type, symbol, amount, price) {
-  const ts = Date.now();
-  const payload = `sym=${symbol}&amt=${amount}&rat=${price}&typ=${type}&ts=${ts}`;
-  const sig = sign(payload);
-
-  const res = await axios.post(
-    `${API}/api/market/place-bid`,
-    payload + `&sig=${sig}`,
-    { headers: { "X-BTK-APIKEY": KEY } }
-  );
   return res.data;
 }
 
-
-export async function getOpenOrders(symbol) {
-  const ts = Date.now();
-  const payload = `sym=${symbol}&ts=${ts}`;
-  const sig = sign(payload);
+export async function getOpenOrders() {
+  const payload = { sym: config.SYMBOL, ts: Date.now() };
+  payload.sig = sign(payload);
 
   const res = await axios.post(
-    `${API}/api/market/my-open-orders`,
-    payload + `&sig=${sig}`,
-    { headers: { "X-BTK-APIKEY": KEY } }
+    `${BASE}/api/market/my-open-orders`,
+    payload,
+    { headers: { "X-BTK-APIKEY": config.BITKUB_API_KEY } }
   );
+
   return res.data.result || [];
 }
 
-export async function cancelOrder(orderId, symbol) {
-  const ts = Date.now();
-  const payload = `id=${orderId}&sym=${symbol}&ts=${ts}`;
-  const sig = sign(payload);
+export async function cancelOrder(id) {
+  const payload = { sym: config.SYMBOL, id, ts: Date.now() };
+  payload.sig = sign(payload);
 
   return axios.post(
-    `${API}/api/market/cancel-order`,
-    payload + `&sig=${sig}`,
-    { headers: { "X-BTK-APIKEY": KEY } }
+    `${BASE}/api/market/cancel-order`,
+    payload,
+    { headers: { "X-BTK-APIKEY": config.BITKUB_API_KEY } }
   );
 }
-
