@@ -1,0 +1,9 @@
+{
+  "name": "bitkub-grid-1000",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "crypto": "^1.0.1"
+  }
+}
