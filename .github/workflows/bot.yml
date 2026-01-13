@@ -1,19 +1,22 @@
 name: Bitkub Grid Bot
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "*/10 * * * *"
-  workflow_dispatch:
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
       - run: npm install
+
       - run: node index.js
         env:
           BITKUB_API_KEY: ${{ secrets.BITKUB_API_KEY }}
