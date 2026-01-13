@@ -132,37 +132,43 @@ class BitkubGridBot:
         return 0, 0
 
     def place_order(self, side, amount_thb, price):
-        """
-        แก้ไข Logic การวาง Order:
-        - Buy: ใช้ endpoint place-bid, amt = THB
-        - Sell: ใช้ endpoint place-ask, amt = Crypto Amount
-        """
+        """วางคำสั่งซื้อ/ขาย (แก้ไขเรื่องทศนิยม)"""
         
-        # 1. กำหนด Endpoint และคำนวณ amt
+        # 1. จัดการเรื่องราคา (Price) ให้เป็นทศนิยม 2 ตำแหน่งเสมอ
+        price = float(f"{price:.2f}")
+
+        # 2. คำนวณ Amount และเลือก Endpoint
         if side.lower() == 'buy':
+            # ขาซื้อ: ใช้ Endpoint place-bid
             endpoint = '/api/v3/market/place-bid'
-            # Bitkub Buy Limit: amt คือจำนวนเงิน THB ที่ต้องการซื้อ
-            amt = amount_thb
-            # ตรวจสอบขั้นต่ำ
+            
+            # จำนวนเงิน (THB) ต้องเป็นทศนิยม 2 ตำแหน่ง
+            amt = float(f"{amount_thb:.2f}")
+            
             if amt < self.min_order_size:
-                print(f"Skipping order: {amt} THB is less than minimum {self.min_order_size}")
+                print(f"⚠️ Skip: Order size {amt} THB < Minimum {self.min_order_size}")
                 return None
         else:
+            # ขาขาย: ใช้ Endpoint place-ask
             endpoint = '/api/v3/market/place-ask'
-            # Bitkub Sell Limit: amt คือจำนวนเหรียญที่ต้องการขาย
-            amt_crypto = amount_thb / price
-            # ตัดทศนิยมให้ถูกต้อง (BTC=8, อื่นๆอาจต่างกัน แต่ 8 ปลอดภัยสุดสำหรับ Crypto ส่วนใหญ่)
-            amt = float(f"{amt_crypto:.8f}") 
+            
+            # จำนวนเหรียญ (Crypto) คำนวณจาก THB / Price
+            # ต้องเป็นทศนิยม 8 ตำแหน่ง (สำหรับ BTC)
+            crypto_amt = amount_thb / price
+            amt = float(f"{crypto_amt:.8f}")
             
         payload = {
             'sym': self.symbol,
             'amt': amt,
             'rat': price,
             'typ': 'limit'
-            # side ไม่ต้องส่งใน body ของ v3 place-bid/ask โดยตรง (endpoint บอกอยู่แล้ว)
+            # side ไม่ต้องใส่ใน body สำหรับ v3
         }
         
-        print(f"🚀 Placing {side.upper()} Order: {amt} @ {price}")
+        # Debug: แสดงค่าที่ส่งไปจริงๆ
+        print(f"🚀 Placing {side.upper()}: amt={amt}, price={price}")
+        # print(f"DEBUG Payload: {json.dumps(payload)}") 
+        
         response = self._make_request(endpoint, 'POST', payload)
         
         if response.get('error') == 0:
@@ -172,7 +178,8 @@ class BitkubGridBot:
             return response.get('result')
         else:
             err_code = response.get('error')
-            # Error 15 = Amount too small, 18 = Insufficient balance, 11 = Check amt
+            # Error 11 = Amount too low / Invalid Amount
+            # Error 18 = Insufficient balance
             msg = f"❌ Order Failed (Err {err_code}): {side.upper()} {amt} @ {price}"
             print(msg)
             print(f"Full Response: {response}")
