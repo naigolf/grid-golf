@@ -46,17 +46,22 @@ class BitkubGridBot:
         self.orders = []
         
     def _get_signature(self, payload):
-        """สร้าง signature สำหรับ authentication"""
+        """สร้าง signature สำหรับ authentication แบบ Bitkub"""
         timestamp = int(time.time())
+        
+        # Bitkub ใช้วิธี: timestamp + json_string
         data = {
             'ts': timestamp,
             **payload
         }
         
-        json_data = json.dumps(data, separators=(',', ':'), sort_keys=True)
+        # สร้าง JSON string โดยไม่มีช่องว่าง
+        json_string = json.dumps(data, separators=(',', ':'), sort_keys=True)
+        
+        # สร้าง signature จาก JSON string
         signature = hmac.new(
             self.api_secret.encode(),
-            msg=json_data.encode(),
+            msg=json_string.encode(),
             digestmod=hashlib.sha256
         ).hexdigest()
         
@@ -75,12 +80,15 @@ class BitkubGridBot:
                     'X-BTK-APIKEY': self.api_key,
                     'X-BTK-SIGN': signature
                 }
+                
                 print(f"Request URL: {url}")
-                print(f"Request Headers: {headers}")
-                print(f"Request Data: {json.dumps(data, indent=2)}")
+                print(f"Timestamp: {data.get('ts')}")
+                print(f"Signature: {signature}")
+                print(f"Request Body: {json.dumps(data, separators=(',', ':'), sort_keys=True)}")
                 
                 response = requests.post(url, json=data, headers=headers, timeout=30)
                 print(f"Response Status: {response.status_code}")
+                print(f"Response Body: {response.text}")
                 return response.json()
             else:
                 response = requests.get(url, timeout=30)
