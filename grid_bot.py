@@ -131,60 +131,66 @@ class BitkubGridBot:
             return thb, crypto
         return 0, 0
 
-    def place_order(self, side, amount_thb, price):
-        """วางคำสั่งซื้อ/ขาย (แก้ไข Symbol และ Amount Logic)"""
+
+def place_order(self, side, amount_thb, price):
+        """วางคำสั่งซื้อ/ขาย (Fix: Buy ใช้ THB, Sell ใช้ BTC)"""
         
-        # 1. แปลง Symbol ให้เป็น format ที่ API v3 ชอบ (เช่น btc_thb)
-        # ปกติ Bitkub ใช้ THB_BTC แต่ v3 place-bid ชอบ btc_thb
+        # 1. แปลง Symbol เป็น btc_thb (ตัวพิมพ์เล็ก) เพื่อแก้ Error 11
         trade_sym = self.symbol.lower().replace('thb_', '').replace('_thb', '') + '_thb'
-        if trade_sym.startswith('thb_'): # กันเหนียวกรณี symbol เดิมแปลกๆ
+        if trade_sym.startswith('thb_'):
             trade_sym = 'btc_thb'
             
-        # 2. คำนวณ Amount (amt) เป็น "จำนวนเหรียญ" (Crypto Quantity) เสมอ
-        # สำหรับ Limit Order: amt คือจำนวนเหรียญที่จะ ซื้อ หรือ ขาย
-        crypto_amt = amount_thb / price
-        
-        # จัดการทศนิยม (BTC ใช้ 8 ตำแหน่ง)
-        amt_str = f"{crypto_amt:.8f}"
-        
-        # 3. จัดการ Price
-        price_str = f"{price:.2f}"
-
-        # เลือก Endpoint
+        # 2. คำนวณ Amount ตามประเภทคำสั่ง (สำคัญมาก!)
         if side.lower() == 'buy':
+            # === ขาซื้อ (Place Bid) ===
             endpoint = '/api/v3/market/place-bid'
+            # Bitkub: ใส่ amt เป็นจำนวนเงิน "บาท" ที่ต้องการซื้อ
+            amt = float(f"{amount_thb:.2f}")
+            
+            # เช็คขั้นต่ำ 10 บาท
+            if amt < self.min_order_size:
+                print(f"⚠️ Skip Buy: {amt} THB < Minimum {self.min_order_size}")
+                return None
+                
         else:
+            # === ขาขาย (Place Ask) ===
             endpoint = '/api/v3/market/place-ask'
+            # Bitkub: ใส่ amt เป็นจำนวน "เหรียญ" ที่ต้องการขาย
+            crypto_amt = amount_thb / price
+            amt = float(f"{crypto_amt:.8f}") # ตัดทศนิยม 8 ตำแหน่งป้องกัน Scientific Notation
 
-        # สร้าง Payload
-        # หมายเหตุ: ส่งเป็น String หรือ Float ก็ได้ แต่ Python dict จะจัดการ type ให้
-        # เราแปลงกลับเป็น float เพื่อตัด trailing zero อัตโนมัติในขั้นตอน json.dumps ของ requests
+        # 3. จัดการ Price
+        price = float(f"{price:.2f}")
+
+        # Payload
         payload = {
-            'sym': trade_sym, 
-            'amt': float(amt_str), # ส่งเป็นจำนวนเหรียญ (BTC)
-            'rat': float(price_str),
+            'sym': trade_sym,
+            'amt': amt,
+            'rat': price,
             'typ': 'limit'
         }
         
-        print(f"🚀 Placing {side.upper()} ({trade_sym}): amt={payload['amt']} BTC, price={payload['rat']} THB")
+        print(f"🚀 Placing {side.upper()} ({trade_sym}): amt={amt}, price={price}")
         
         response = self._make_request(endpoint, 'POST', payload)
         
         if response.get('error') == 0:
-            msg = f"✅ {side.upper()} Success: {payload['amt']:.8f} BTC @ {payload['rat']:,.2f}"
+            msg = f"✅ {side.upper()} Success: {amt} @ {price:,.2f}"
             print(msg)
             self.telegram.send_message(msg)
             return response.get('result')
         else:
             err_code = response.get('error')
-            # Err 11 = Invalid Symbol (มักเกิดถ้าใช้ THB_BTC)
-            # Err 15 = Amount too low (ถ้าคำนวณเหรียญผิด)
-            # Err 18 = Insufficient balance
-            msg = f"❌ Order Failed (Err {err_code}): {side.upper()} {payload['amt']} @ {payload['rat']}"
+            # 11 = Invalid Symbol/Format
+            # 15 = Amount too low
+            # 18 = Insufficient Balance
+            msg = f"❌ Order Failed (Err {err_code}): {side.upper()} {amt} @ {price}"
             print(msg)
             print(f"Full Response: {response}")
             self.telegram.send_message(msg)
             return None
+
+    
 
     def calculate_grid_levels(self, current_price):
         upper_price = current_price * (1 + self.price_range)
