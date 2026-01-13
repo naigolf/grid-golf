@@ -1,33 +1,37 @@
-import { getPrice, getBalance, placeOrder } from "./bitkub.js";
+import config from "./config.js";
+import { getPrice, placeOrder, getOpenOrders, cancelOrder } from "./bitkub.js";
+import { notify } from "./telegram.js";
 
-const SYMBOL = "XRP_THB";
-const GRID = 0.006; // 0.6%
-const MIN_THB = 100;
+async function main() {
+  const price = await getPrice();
 
-async function run() {
-  const price = await getPrice(SYMBOL);
-  const bal = await getBalance();
+  const buyPrice = price * (1 - config.BUY_DROP_PERCENT / 100);
+  const sellPrice = price * (1 + config.SELL_RISE_PERCENT / 100);
 
-  const thb = bal.THB?.available || 0;
-  const xrp = bal.XRP?.available || 0;
+  const qty = config.TRADE_THB / buyPrice;
 
-  console.log("PRICE:", price, "THB:", thb, "XRP:", xrp);
+  const orders = await getOpenOrders();
 
-  // ถ้ามี XRP → ตั้งขาย
-  if (xrp * price >= MIN_THB) {
-    const sellPrice = Math.floor(price * (1 + GRID) * 100) / 100;
-    console.log("SELL @", sellPrice);
-    await placeOrder("sell", SYMBOL, xrp, sellPrice);
-    return;
+  // 🔴 กันออเดอร์ค้าง
+  for (const o of orders) {
+    const age = (Date.now() - o.ts) / 60000;
+    if (age > config.MAX_ORDER_MINUTES) {
+      await cancelOrder(o.id);
+      await notify(`❌ Cancel order ${o.id} (timeout)`);
+    }
   }
 
-  // ถ้ามี THB → ตั้งซื้อ
-  if (thb >= MIN_THB) {
-    const buyPrice = Math.floor(price * (1 - GRID) * 100) / 100;
-    const amount = Math.floor((thb / buyPrice) * 100) / 100;
-    console.log("BUY @", buyPrice);
-    await placeOrder("buy", SYMBOL, amount, buyPrice);
+  if (orders.length === 0) {
+    const buy = await placeOrder("bid", qty, buyPrice);
+    await notify(
+      `🟢 BUY\nราคา: ${buyPrice.toFixed(4)}\nจำนวน: ${qty.toFixed(2)}`
+    );
+
+    const sell = await placeOrder("ask", qty, sellPrice);
+    await notify(
+      `🔵 SELL\nราคา: ${sellPrice.toFixed(4)}\nจำนวน: ${qty.toFixed(2)}`
+    );
   }
 }
 
-run().catch(console.error);
+main().catch(err => notify("⚠️ ERROR\n" + err.message));
