@@ -1,5 +1,6 @@
 export default {
-  SYMBOL: "DOGE_THB",
+  SYMBOL_TICKER: "DOGE-THB",
+  SYMBOL_TRADE: "DOGE_THB",
 
   TRADE_THB: 200,
 
