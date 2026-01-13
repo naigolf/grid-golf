@@ -132,63 +132,82 @@ class BitkubGridBot:
         return 0, 0
 
 
-def place_order(self, side, amount_thb, price):
-        """วางคำสั่งซื้อ/ขาย (Fix: Buy ใช้ THB, Sell ใช้ BTC)"""
+    def place_order(self, side, amount_thb, price):
+        """
+        วางคำสั่งซื้อ/ขาย ตามเอกสาร Bitkub API v3
+        - Buy (place-bid): amt คือ จำนวนเงินบาท (THB)
+        - Sell (place-ask): amt คือ จำนวนเหรียญ (Crypto)
+        """
         
-        # 1. แปลง Symbol เป็น btc_thb (ตัวพิมพ์เล็ก) เพื่อแก้ Error 11
-        trade_sym = self.symbol.lower().replace('thb_', '').replace('_thb', '') + '_thb'
-        if trade_sym.startswith('thb_'):
-            trade_sym = 'btc_thb'
-            
-        # 2. คำนวณ Amount ตามประเภทคำสั่ง (สำคัญมาก!)
+        # 1. จัดการ Symbol ให้เป็นตัวเล็กเสมอ (btc_thb) ตาม Best Practice v3
+        # แปลง THB_BTC -> btc_thb
+        symbol_clean = self.symbol.lower()
+        if 'thb_' in symbol_clean:
+            base = symbol_clean.replace('thb_', '')
+            trade_sym = f"{base}_thb"
+        elif '_thb' in symbol_clean:
+            trade_sym = symbol_clean
+        else:
+            # กรณี format ไม่มาตรฐาน ให้ default เป็น btc_thb หรือตามที่ใส่มา
+            trade_sym = f"{symbol_clean}_thb" if not symbol_clean.endswith('_thb') else symbol_clean
+
+        # 2. กำหนด Endpoint และ Amount
         if side.lower() == 'buy':
-            # === ขาซื้อ (Place Bid) ===
+            # === ฝั่งซื้อ (Buy) ===
             endpoint = '/api/v3/market/place-bid'
-            # Bitkub: ใส่ amt เป็นจำนวนเงิน "บาท" ที่ต้องการซื้อ
-            amt = float(f"{amount_thb:.2f}")
             
-            # เช็คขั้นต่ำ 10 บาท
+            # Key Point: ส่งเป็นจำนวนเงินบาท (THB)
+            amt = float(amount_thb)
+            
+            # ตรวจสอบขั้นต่ำ 10 บาท
             if amt < self.min_order_size:
-                print(f"⚠️ Skip Buy: {amt} THB < Minimum {self.min_order_size}")
+                print(f"⚠️ Skip Buy: Amount {amt} THB is too low (Min {self.min_order_size})")
                 return None
                 
         else:
-            # === ขาขาย (Place Ask) ===
+            # === ฝั่งขาย (Sell) ===
             endpoint = '/api/v3/market/place-ask'
-            # Bitkub: ใส่ amt เป็นจำนวน "เหรียญ" ที่ต้องการขาย
+            
+            # Key Point: ส่งเป็นจำนวนเหรียญ (Crypto)
+            # คำนวณจาก บาท / ราคา
             crypto_amt = amount_thb / price
-            amt = float(f"{crypto_amt:.8f}") # ตัดทศนิยม 8 ตำแหน่งป้องกัน Scientific Notation
+            # ตัดทศนิยม 8 ตำแหน่ง (สำหรับ BTC) เพื่อไม่ให้เกิด Scientific Notation
+            amt = float(f"{crypto_amt:.8f}")
 
-        # 3. จัดการ Price
-        price = float(f"{price:.2f}")
-
-        # Payload
+        # 3. สร้าง Payload
         payload = {
             'sym': trade_sym,
-            'amt': amt,
-            'rat': price,
-            'typ': 'limit'
+            'amt': amt,           # Buy=THB, Sell=Crypto
+            'rat': float(price),  # ราคาที่ต้องการ (THB)
+            'typ': 'limit'        # ประเภท Limit Order
         }
         
-        print(f"🚀 Placing {side.upper()} ({trade_sym}): amt={amt}, price={price}")
+        print(f"🚀 Placing {side.upper()} [{trade_sym}]: amt={amt}, price={price}")
         
+        # 4. ส่ง Request
         response = self._make_request(endpoint, 'POST', payload)
         
+        # 5. ตรวจสอบผลลัพธ์
         if response.get('error') == 0:
-            msg = f"✅ {side.upper()} Success: {amt} @ {price:,.2f}"
+            result = response.get('result', {})
+            order_id = result.get('id')
+            msg = f"✅ {side.upper()} Success: ID {order_id} | {amt} @ {price:,.2f}"
             print(msg)
             self.telegram.send_message(msg)
-            return response.get('result')
+            return result
         else:
             err_code = response.get('error')
-            # 11 = Invalid Symbol/Format
-            # 15 = Amount too low
-            # 18 = Insufficient Balance
-            msg = f"❌ Order Failed (Err {err_code}): {side.upper()} {amt} @ {price}"
+            # Error Mapping ตาม Docs
+            # 11: Invalid Amount/Symbol
+            # 15: Amount too low (< 10 THB)
+            # 18: Insufficient Balance
+            # 24: Invalid Symbol
+            msg = f"❌ Order Failed (Err {err_code}): {side.upper()} amt={amt} @ price={price}"
             print(msg)
             print(f"Full Response: {response}")
             self.telegram.send_message(msg)
             return None
+            
 
     
 
