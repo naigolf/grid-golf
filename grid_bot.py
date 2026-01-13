@@ -66,36 +66,68 @@ class BitkubGridBot:
         """ส่ง request ไปยัง Bitkub API"""
         url = f"{self.base_url}{endpoint}"
         
-        if method == 'POST':
-            data, signature = self._get_signature(payload or {})
-            headers = {
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                'X-BTK-APIKEY': self.api_key,
-                'X-BTK-SIGN': signature
-            }
-            response = requests.post(url, json=data, headers=headers)
-        else:
-            response = requests.get(url)
-        
-        return response.json()
+        try:
+            if method == 'POST':
+                data, signature = self._get_signature(payload or {})
+                headers = {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'X-BTK-APIKEY': self.api_key,
+                    'X-BTK-SIGN': signature
+                }
+                print(f"Request URL: {url}")
+                print(f"Request Headers: {headers}")
+                print(f"Request Data: {json.dumps(data, indent=2)}")
+                
+                response = requests.post(url, json=data, headers=headers, timeout=30)
+                print(f"Response Status: {response.status_code}")
+                return response.json()
+            else:
+                response = requests.get(url, timeout=30)
+                return response.json()
+        except requests.exceptions.Timeout:
+            print(f"❌ Request timeout: {url}")
+            return {'error': 'timeout'}
+        except Exception as e:
+            print(f"❌ Request error: {str(e)}")
+            return {'error': str(e)}
     
     def get_ticker(self):
         """ดึงราคาปัจจุบัน"""
-        response = self._make_request('/api/market/ticker')
-        if self.symbol in response:
-            return float(response[self.symbol]['last'])
+        try:
+            response = self._make_request('/api/market/ticker')
+            print(f"Ticker API Response: {json.dumps(response, indent=2)}")
+            
+            if self.symbol in response:
+                return float(response[self.symbol]['last'])
+            else:
+                error_msg = f"❌ Symbol {self.symbol} not found in ticker response"
+                print(error_msg)
+                self.telegram.send_message(error_msg)
+        except Exception as e:
+            error_msg = f"❌ Ticker API Error: {str(e)}"
+            print(error_msg)
+            self.telegram.send_message(error_msg)
         return None
     
     def get_balance(self):
         """ตรวจสอบยอดเงิน"""
         response = self._make_request('/api/market/balances', 'POST', {})
+        
+        # Debug: แสดง response เต็ม
+        print(f"Balance API Response: {json.dumps(response, indent=2)}")
+        
         if response.get('error') == 0:
             result = response.get('result', {})
             thb_balance = float(result.get('THB', {}).get('available', 0))
             crypto_symbol = self.symbol.split('_')[1]
             crypto_balance = float(result.get(crypto_symbol, {}).get('available', 0))
             return thb_balance, crypto_balance
+        else:
+            error_code = response.get('error')
+            error_msg = f"❌ API Error Code: {error_code}\nResponse: {json.dumps(response, indent=2)}"
+            print(error_msg)
+            self.telegram.send_message(f"<b>API Error</b>\n<pre>{error_msg}</pre>")
         return 0, 0
     
     def place_order(self, side, amount, price):
