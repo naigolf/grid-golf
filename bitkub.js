@@ -39,3 +39,30 @@ export async function placeOrder(type, symbol, amount, price) {
   );
   return res.data;
 }
+
+
+export async function getOpenOrders(symbol) {
+  const ts = Date.now();
+  const payload = `sym=${symbol}&ts=${ts}`;
+  const sig = sign(payload);
+
+  const res = await axios.post(
+    `${API}/api/market/my-open-orders`,
+    payload + `&sig=${sig}`,
+    { headers: { "X-BTK-APIKEY": KEY } }
+  );
+  return res.data.result || [];
+}
+
+export async function cancelOrder(orderId, symbol) {
+  const ts = Date.now();
+  const payload = `id=${orderId}&sym=${symbol}&ts=${ts}`;
+  const sig = sign(payload);
+
+  return axios.post(
+    `${API}/api/market/cancel-order`,
+    payload + `&sig=${sig}`,
+    { headers: { "X-BTK-APIKEY": KEY } }
+  );
+}
+
