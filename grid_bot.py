@@ -112,7 +112,7 @@ class BitkubGridBot:
     
     def get_balance(self):
         """ตรวจสอบยอดเงิน"""
-        response = self._make_request('/api/market/balances', 'POST', {})
+        response = self._make_request('/api/v3/market/balances', 'POST', {})
         
         # Debug: แสดง response เต็ม
         print(f"Balance API Response: {json.dumps(response, indent=2)}")
@@ -140,7 +140,7 @@ class BitkubGridBot:
             'side': side
         }
         
-        response = self._make_request('/api/market/place-bid', 'POST', payload)
+        response = self._make_request('/api/v3/market/place-bid', 'POST', payload)
         
         if response.get('error') == 0:
             msg = f"✅ {side.upper()} order placed: {amount} THB @ {price}"
@@ -263,7 +263,7 @@ class BitkubGridBot:
             return
         
         # ดึงคำสั่งที่กำลังทำงาน
-        response = self._make_request('/api/market/my-open-orders', 'POST', {})
+        response = self._make_request('/api/v3/market/my-open-orders', 'POST', {})
         
         if response.get('error') == 0:
             open_orders = response.get('result', [])
@@ -299,7 +299,7 @@ class BitkubGridBot:
     def check_filled_orders(self):
         """ตรวจสอบคำสั่งที่ถูก fill และวางคำสั่งขายใหม่"""
         # ดึงประวัติการเทรด
-        response = self._make_request('/api/market/my-order-history', 'POST', {
+        response = self._make_request('/api/v3/market/my-order-history', 'POST', {
             'sym': self.symbol,
             'lmt': 20
         })
