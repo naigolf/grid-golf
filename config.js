@@ -1,6 +1,6 @@
 export default {
-  SYMBOL_TICKER: "DOGE-THB",
-  SYMBOL_TRADE: "DOGE_THB",
+  SYMBOL_TICKER: "THB_DOGE",   // สำหรับ ticker
+  SYMBOL_TRADE: "DOGE_THB",   // สำหรับส่งคำสั่งเทรด (ยังใช้แบบเดิม)
 
   TRADE_THB: 200,
 
