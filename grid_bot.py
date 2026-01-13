@@ -45,27 +45,30 @@ class BitkubGridBot:
         
         self.orders = []
         
-    def _get_signature(self, payload):
-        """สร้าง signature สำหรับ authentication แบบ Bitkub"""
-        timestamp = int(time.time())
+    def get_server_time(self):
+        """ดึง server time จาก Bitkub (milliseconds)"""
+        try:
+            response = requests.get(f'{self.base_url}/api/v3/servertime', timeout=10)
+            return int(response.text)
+        except:
+            # ถ้าเรียก API ไม่ได้ ใช้เวลาปัจจุบัน
+            return int(time.time() * 1000)
+    
+    def _get_signature(self, method, path, body=''):
+        """สร้าง signature สำหรับ Bitkub API v3"""
+        timestamp = self.get_server_time()
         
-        # Bitkub ใช้วิธี: timestamp + json_string
-        data = {
-            'ts': timestamp,
-            **payload
-        }
+        # Format: timestamp + method + path + body
+        payload = f"{timestamp}{method}{path}{body}"
         
-        # สร้าง JSON string โดยไม่มีช่องว่าง
-        json_string = json.dumps(data, separators=(',', ':'), sort_keys=True)
-        
-        # สร้าง signature จาก JSON string
+        # สร้าง signature
         signature = hmac.new(
             self.api_secret.encode(),
-            msg=json_string.encode(),
+            msg=payload.encode(),
             digestmod=hashlib.sha256
         ).hexdigest()
         
-        return data, signature
+        return timestamp, signature
     
     def _make_request(self, endpoint, method='GET', payload=None):
         """ส่ง request ไปยัง Bitkub API"""
@@ -73,25 +76,48 @@ class BitkubGridBot:
         
         try:
             if method == 'POST':
-                data, signature = self._get_signature(payload or {})
+                # สร้าง body JSON
+                body = json.dumps(payload or {}, separators=(',', ':'))
+                
+                # สร้าง signature
+                timestamp, signature = self._get_signature(method, endpoint, body)
+                
                 headers = {
                     'Accept': 'application/json',
                     'Content-Type': 'application/json',
                     'X-BTK-APIKEY': self.api_key,
-                    'X-BTK-SIGN': signature
+                    'X-BTK-SIGN': signature,
+                    'X-BTK-TIMESTAMP': str(timestamp)
                 }
                 
                 print(f"Request URL: {url}")
-                print(f"Timestamp: {data.get('ts')}")
+                print(f"Timestamp: {timestamp}")
+                print(f"Method: {method}")
+                print(f"Path: {endpoint}")
+                print(f"Body: {body}")
                 print(f"Signature: {signature}")
-                print(f"Request Body: {json.dumps(data, separators=(',', ':'), sort_keys=True)}")
                 
-                response = requests.post(url, json=data, headers=headers, timeout=30)
+                response = requests.post(url, data=body, headers=headers, timeout=30)
                 print(f"Response Status: {response.status_code}")
                 print(f"Response Body: {response.text}")
                 return response.json()
             else:
-                response = requests.get(url, timeout=30)
+                # GET request
+                query_string = ''
+                if payload:
+                    query_string = '?' + '&'.join([f"{k}={v}" for k, v in payload.items()])
+                
+                timestamp, signature = self._get_signature(method, endpoint, query_string)
+                
+                headers = {
+                    'Accept': 'application/json',
+                    'X-BTK-APIKEY': self.api_key,
+                    'X-BTK-SIGN': signature,
+                    'X-BTK-TIMESTAMP': str(timestamp)
+                }
+                
+                full_url = f"{url}{query_string}"
+                response = requests.get(full_url, headers=headers, timeout=30)
                 return response.json()
         except requests.exceptions.Timeout:
             print(f"❌ Request timeout: {url}")
