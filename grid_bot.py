@@ -164,12 +164,24 @@ class BitkubGridBot:
             self.telegram.send_message(f"<b>API Error</b>\n<pre>{error_msg}</pre>")
         return 0, 0
     
-    def place_order(self, side, amount, price):
-        """วางคำสั่งซื้อ/ขาย"""
+    def place_order(self, side, amount_thb, price):
+        """วางคำสั่งซื้อ/ขาย
+        
+        Args:
+            side: 'buy' or 'sell'
+            amount_thb: จำนวนเงิน THB ที่ต้องการใช้
+            price: ราคาที่ต้องการซื้อ/ขาย (THB)
+        """
+        # คำนวณจำนวนเหรียญจาก THB
+        amount_crypto = amount_thb / price
+        
+        # ปัดให้เหมาะสมกับ BTC (8 ทศนิยม)
+        amount_crypto = round(amount_crypto, 8)
+        
         payload = {
             'sym': self.symbol,
-            'amt': amount,
-            'rat': price,
+            'amt': amount_crypto,  # จำนวนเหรียญ (BTC)
+            'rat': price,          # ราคาต่อหน่วย (THB)
             'typ': 'limit',
             'side': side
         }
@@ -177,12 +189,13 @@ class BitkubGridBot:
         response = self._make_request('/api/v3/market/place-bid', 'POST', payload)
         
         if response.get('error') == 0:
-            msg = f"✅ {side.upper()} order placed: {amount} THB @ {price}"
+            msg = f"✅ {side.upper()} {amount_crypto:.8f} {self.symbol.split('_')[1]} @ {price:,.2f} THB (≈{amount_thb:.2f} THB)"
             print(msg)
             self.telegram.send_message(f"<b>Order Placed</b>\n{msg}")
             return response.get('result')
         else:
-            error_msg = f"❌ Order failed: {response.get('error')}"
+            error_code = response.get('error')
+            error_msg = f"❌ Order failed (Error {error_code}): {amount_crypto:.8f} {self.symbol.split('_')[1]} @ {price:,.2f} THB"
             print(error_msg)
             self.telegram.send_message(f"<b>⚠️ Order Failed</b>\n{error_msg}")
             return None
