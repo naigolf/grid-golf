@@ -13,350 +13,168 @@ class TelegramNotifier:
         self.base_url = f'https://api.telegram.org/bot{self.token}'
     
     def send_message(self, message):
-        """ส่งข้อความผ่าน Telegram"""
         try:
-            if not self.token or not self.chat_id:
-                print("Telegram token or chat_id not set.")
-                return None
-                
+            if not self.token or not self.chat_id: return
             url = f'{self.base_url}/sendMessage'
-            data = {
-                'chat_id': self.chat_id,
-                'text': message,
-                'parse_mode': 'HTML'
-            }
-            response = requests.post(url, data=data, timeout=10)
-            return response.json()
+            data = {'chat_id': self.chat_id, 'text': message, 'parse_mode': 'HTML'}
+            requests.post(url, data=data, timeout=10)
         except Exception as e:
-            print(f"Failed to send Telegram message: {e}")
-            return None
+            print(f"Telegram Error: {e}")
 
-class BitkubGridBot:
+class BitkubRSIBot:
     def __init__(self):
         self.api_key = os.environ.get('BITKUB_API_KEY')
         self.api_secret = os.environ.get('BITKUB_API_SECRET')
         self.base_url = 'https://api.bitkub.com'
-        
-        # Telegram Notifier
         self.telegram = TelegramNotifier()
         
-        # Grid Trading Parameters
+        # --- ตั้งค่ากลยุทธ์ตรงนี้ ---
         self.symbol = os.environ.get('SYMBOL', 'THB_BTC')
-        self.budget = float(os.environ.get('BUDGET', '1000'))
-        self.grid_levels = int(os.environ.get('GRID_LEVELS', '5'))
-        self.price_range = float(os.environ.get('PRICE_RANGE', '0.02'))
-        self.min_order_size = float(os.environ.get('MIN_ORDER_SIZE', '10'))
+        self.trade_amt = float(os.environ.get('TRADE_AMOUNT', '500')) # เทรดไม้ละ 500 บาท (ทุน 1000 แบ่ง 2 ไม้)
+        self.rsi_buy = 30  # ซื้อเมื่อ RSI ต่ำกว่า 30
+        self.tp_percent = 1.5 # ขายเมื่อกำไร 1.5%
+        self.timeframe = '15' # เช็คกราฟ 15 นาที
+        # ------------------------
         
-        self.orders = []
-        
-    def get_server_time(self):
-        """ดึง server time จาก Bitkub"""
+        self.state = {'holding': False, 'buy_price': 0, 'qty': 0}
+
+    def _get_server_time(self):
         try:
-            response = requests.get(f'{self.base_url}/api/v3/servertime', timeout=10)
-            return int(response.text)
+            return int(requests.get(f'{self.base_url}/api/v3/servertime').text)
         except:
             return int(time.time() * 1000)
-    
-    def _get_signature(self, method, path, body=''):
-        timestamp = self.get_server_time()
-        payload = f"{timestamp}{method}{path}{body}"
-        signature = hmac.new(
-            self.api_secret.encode(),
-            msg=payload.encode(),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        return timestamp, signature
-    
+
     def _make_request(self, endpoint, method='GET', payload=None):
-        url = f"{self.base_url}{endpoint}"
         try:
             if method == 'POST':
+                ts = self._get_server_time()
                 body = json.dumps(payload or {}, separators=(',', ':'))
-                timestamp, signature = self._get_signature(method, endpoint, body)
-                
+                sig = hmac.new(self.api_secret.encode(), f"{ts}{method}{endpoint}{body}".encode(), hashlib.sha256).hexdigest()
                 headers = {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'X-BTK-APIKEY': self.api_key,
-                    'X-BTK-SIGN': signature,
-                    'X-BTK-TIMESTAMP': str(timestamp)
+                    'Accept': 'application/json', 'Content-Type': 'application/json',
+                    'X-BTK-APIKEY': self.api_key, 'X-BTK-SIGN': sig, 'X-BTK-TIMESTAMP': str(ts)
                 }
-                
-                print(f"Request: {method} {endpoint}")
-                # print(f"Body: {body}") # Uncomment for debug
-                
-                response = requests.post(url, data=body, headers=headers, timeout=30)
-                
-                # Handle non-JSON response
-                try:
-                    return response.json()
-                except json.JSONDecodeError:
-                    return {'error': 999, 'result': response.text}
+                return requests.post(f"{self.base_url}{endpoint}", data=body, headers=headers).json()
             else:
-                # GET Logic (Not heavily used in this bot)
-                query_string = ''
-                if payload:
-                    query_string = '?' + '&'.join([f"{k}={v}" for k, v in payload.items()])
-                timestamp, signature = self._get_signature(method, endpoint, query_string)
-                headers = {
-                    'Accept': 'application/json',
-                    'X-BTK-APIKEY': self.api_key,
-                    'X-BTK-SIGN': signature,
-                    'X-BTK-TIMESTAMP': str(timestamp)
-                }
-                full_url = f"{url}{query_string}"
-                response = requests.get(full_url, headers=headers, timeout=30)
-                return response.json()
-                
+                return requests.get(f"{self.base_url}{endpoint}").json()
         except Exception as e:
-            print(f"❌ Request error: {str(e)}")
             return {'error': str(e)}
-    
-    def get_ticker(self):
+
+    def get_rsi(self):
+        """คำนวณ RSI 14 ย้อนหลัง แบบไม่ต้องใช้ Library"""
         try:
-            response = requests.get(f'{self.base_url}/api/market/ticker')
-            data = response.json()
-            if self.symbol in data:
-                return float(data[self.symbol]['last'])
+            sym_clean = self.symbol.lower().replace('thb_', '').replace('_thb', '') + '_thb'
+            # ดึงข้อมูลแท่งเทียน
+            url = f"{self.base_url}/api/market/candles?sym={sym_clean}&res={self.timeframe}&lmt=20"
+            data = requests.get(url).json()
+            
+            if not data or 'c' not in data: return None
+            
+            closes = [float(c) for c in data['c']] # ราคาปิด
+            
+            if len(closes) < 15: return 50 # ข้อมูลไม่พอ
+            
+            # คำนวณ RSI
+            gains = []
+            losses = []
+            for i in range(1, 15):
+                change = closes[i] - closes[i-1]
+                if change >= 0:
+                    gains.append(change)
+                    losses.append(0)
+                else:
+                    gains.append(0)
+                    losses.append(abs(change))
+            
+            avg_gain = sum(gains) / 14
+            avg_loss = sum(losses) / 14
+            
+            if avg_loss == 0: return 100
+            
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            
+            return rsi, closes[-1] # คืนค่า RSI และราคาปัจจุบัน
         except Exception as e:
-            print(f"Ticker Error: {e}")
-        return None
+            print(f"RSI Error: {e}")
+            return None, None
 
-    def get_balance(self):
-        response = self._make_request('/api/v3/market/balances', 'POST', {})
-        if response.get('error') == 0:
-            result = response.get('result', {})
-            thb = float(result.get('THB', {}).get('available', 0))
-            crypto = float(result.get(self.symbol.split('_')[1], {}).get('available', 0))
-            return thb, crypto
-        return 0, 0
-
-
-    def place_order(self, side, amount_thb, price):
-        """
-        วางคำสั่งซื้อ/ขาย ตามเอกสาร Bitkub API v3
-        - Buy (place-bid): amt คือ จำนวนเงินบาท (THB)
-        - Sell (place-ask): amt คือ จำนวนเหรียญ (Crypto)
-        """
+    def place_order(self, side, val, price):
+        # จัดการ Symbol และ Amount
+        sym = self.symbol.lower().replace('thb_', '').replace('_thb', '') + '_thb'
+        if sym.startswith('thb_'): sym = 'btc_thb'
         
-        # 1. จัดการ Symbol ให้เป็นตัวเล็กเสมอ (btc_thb) ตาม Best Practice v3
-        # แปลง THB_BTC -> btc_thb
-        symbol_clean = self.symbol.lower()
-        if 'thb_' in symbol_clean:
-            base = symbol_clean.replace('thb_', '')
-            trade_sym = f"{base}_thb"
-        elif '_thb' in symbol_clean:
-            trade_sym = symbol_clean
+        if side == 'buy':
+            endpoint, amt = '/api/v3/market/place-bid', float(val)
         else:
-            # กรณี format ไม่มาตรฐาน ให้ default เป็น btc_thb หรือตามที่ใส่มา
-            trade_sym = f"{symbol_clean}_thb" if not symbol_clean.endswith('_thb') else symbol_clean
+            endpoint, amt = '/api/v3/market/place-ask', float(f"{val:.8f}")
 
-        # 2. กำหนด Endpoint และ Amount
-        if side.lower() == 'buy':
-            # === ฝั่งซื้อ (Buy) ===
-            endpoint = '/api/v3/market/place-bid'
-            
-            # Key Point: ส่งเป็นจำนวนเงินบาท (THB)
-            amt = float(amount_thb)
-            
-            # ตรวจสอบขั้นต่ำ 10 บาท
-            if amt < self.min_order_size:
-                print(f"⚠️ Skip Buy: Amount {amt} THB is too low (Min {self.min_order_size})")
-                return None
-                
-        else:
-            # === ฝั่งขาย (Sell) ===
-            endpoint = '/api/v3/market/place-ask'
-            
-            # Key Point: ส่งเป็นจำนวนเหรียญ (Crypto)
-            # คำนวณจาก บาท / ราคา
-            crypto_amt = amount_thb / price
-            # ตัดทศนิยม 8 ตำแหน่ง (สำหรับ BTC) เพื่อไม่ให้เกิด Scientific Notation
-            amt = float(f"{crypto_amt:.8f}")
-
-        # 3. สร้าง Payload
-        payload = {
-            'sym': trade_sym,
-            'amt': amt,           # Buy=THB, Sell=Crypto
-            'rat': float(price),  # ราคาที่ต้องการ (THB)
-            'typ': 'limit'        # ประเภท Limit Order
-        }
-        
-        print(f"🚀 Placing {side.upper()} [{trade_sym}]: amt={amt}, price={price}")
-        
-        # 4. ส่ง Request
-        response = self._make_request(endpoint, 'POST', payload)
-        
-        # 5. ตรวจสอบผลลัพธ์
-        if response.get('error') == 0:
-            result = response.get('result', {})
-            order_id = result.get('id')
-            msg = f"✅ {side.upper()} Success: ID {order_id} | {amt} @ {price:,.2f}"
-            print(msg)
-            self.telegram.send_message(msg)
-            return result
-        else:
-            err_code = response.get('error')
-            # Error Mapping ตาม Docs
-            # 11: Invalid Amount/Symbol
-            # 15: Amount too low (< 10 THB)
-            # 18: Insufficient Balance
-            # 24: Invalid Symbol
-            msg = f"❌ Order Failed (Err {err_code}): {side.upper()} amt={amt} @ price={price}"
-            print(msg)
-            print(f"Full Response: {response}")
-            self.telegram.send_message(msg)
-            return None
-            
-
-    
-
-    def calculate_grid_levels(self, current_price):
-        upper_price = current_price * (1 + self.price_range)
-        lower_price = current_price * (1 - self.price_range)
-        price_step = (upper_price - lower_price) / (self.grid_levels - 1)
-        
-        grid_prices = []
-        for i in range(self.grid_levels):
-            price = lower_price + (i * price_step)
-            # ปัดเศษราคาตามความเหมาะสม (เช่น BTC ราคาหลักล้าน อาจไม่ต้องละเอียดมาก แต่ API รับทศนิยมได้)
-            grid_prices.append(round(price, 2))
-        return grid_prices
-
-    def setup_grid(self):
-        current_price = self.get_ticker()
-        if not current_price:
-            self.telegram.send_message("❌ Cannot fetch price. Aborting.")
-            return
-
-        thb_balance, _ = self.get_balance()
-        print(f"Balance: {thb_balance:.2f} THB")
-        
-        if thb_balance < self.min_order_size:
-            self.telegram.send_message("❌ Insufficient THB balance to start grid.")
-            return
-
-        # คำนวณราคา Grid
-        grid_prices = self.calculate_grid_levels(current_price)
-        
-        # คำนวณ Budget ต่อไม้
-        order_amount_thb = self.budget / self.grid_levels
-        
-        msg = f"🤖 Starting Grid\nPrice: {current_price:,.2f}\nOrders: {self.grid_levels}\nPer Order: {order_amount_thb:,.2f} THB"
-        self.telegram.send_message(msg)
-
-        # วาง Order ซื้อ (Buy Limit) ที่ราคาต่ำกว่าปัจจุบัน
-        for price in grid_prices:
-            if price < current_price:
-                # ตรวจสอบ Budget ว่าพอมั้ย
-                if thb_balance >= order_amount_thb:
-                    res = self.place_order('buy', order_amount_thb, price)
-                    if res:
-                        self.orders.append({
-                            'id': res.get('id'),
-                            'side': 'buy',
-                            'price': price,
-                            'amount_thb': order_amount_thb,
-                            'timestamp': datetime.now().isoformat()
-                        })
-                        thb_balance -= order_amount_thb # ตัดยอดคงเหลือใน memory
-                        time.sleep(1) # Delay เพื่อป้องกัน Rate limit
-        
-        self.save_state()
-
-    def check_and_rebalance(self):
-        print("🔄 Checking Status...")
-        # 1. เช็ค Open Orders
-        response = self._make_request('/api/v3/market/my-open-orders', 'POST', {'sym': self.symbol})
-        open_orders = []
-        if response.get('error') == 0:
-            open_orders = response.get('result', [])
-        
-        open_order_ids = [str(o['id']) for o in open_orders]
-        
-        # 2. เปรียบเทียบกับ Orders ที่เราบันทึกไว้
-        # ถ้า Order ไม่อยู่ใน Open Orders แสดงว่ามัน Filled (สำเร็จ) หรือ Cancelled
-        completed_orders = []
-        active_orders = []
-        
-        for saved_order in self.orders:
-            if str(saved_order['id']) not in open_order_ids:
-                completed_orders.append(saved_order)
-            else:
-                active_orders.append(saved_order)
-        
-        self.orders = active_orders # อัปเดตรายการที่ยังค้างอยู่
-        
-        # 3. Logic Grid Trading: ถ้า Buy Filled -> ตั้ง Sell ที่ราคาสูงขึ้น 1 step
-        # (นี่คือ Logic ง่ายๆ สำหรับ Grid)
-        for order in completed_orders:
-            if order['side'] == 'buy':
-                # Order ซื้อสำเร็จ -> ต้องตั้งขาย (Take Profit)
-                print(f"✅ Buy Order {order['id']} Filled! Placing Sell order.")
-                self.telegram.send_message(f"✅ Buy Filled @ {order['price']:,.2f}. Placing Sell.")
-                
-                # คำนวณราคาขาย (เช่น บวกกำไรไป 1 grid step หรือ % คงที่)
-                # ในที่นี้สมมติ +1.5%
-                sell_price = order['price'] * 1.015 
-                
-                # ตั้งขาย
-                res = self.place_order('sell', order['amount_thb'], sell_price)
-                if res:
-                    self.orders.append({
-                        'id': res.get('id'),
-                        'side': 'sell',
-                        'price': sell_price,
-                        'amount_thb': order['amount_thb'], # เก็บค่าอ้างอิงไว้
-                        'timestamp': datetime.now().isoformat()
-                    })
-            
-            elif order['side'] == 'sell':
-                # Order ขายสำเร็จ -> รับกำไรแล้ว -> ตั้งซื้อกลับที่เดิม (Re-buy)
-                print(f"💰 Sell Order {order['id']} Filled! Re-placing Buy order.")
-                self.telegram.send_message(f"💰 Sell Filled @ {order['price']:,.2f}. Grid Profit! Re-buying lower.")
-                
-                buy_price = order['price'] / 1.015
-                res = self.place_order('buy', order['amount_thb'], buy_price)
-                if res:
-                    self.orders.append({
-                        'id': res.get('id'),
-                        'side': 'buy',
-                        'price': buy_price,
-                        'amount_thb': order['amount_thb'],
-                        'timestamp': datetime.now().isoformat()
-                    })
-
-        self.save_state()
-
-    def save_state(self):
-        state = {
-            'orders': self.orders,
-            'last_update': datetime.now().isoformat()
-        }
-        with open('bot_state.json', 'w') as f:
-            json.dump(state, f, indent=2)
+        payload = {'sym': sym, 'amt': amt, 'rat': float(f"{price:.2f}"), 'typ': 'limit'}
+        return self._make_request(endpoint, 'POST', payload)
 
     def load_state(self):
         try:
-            with open('bot_state.json', 'r') as f:
-                state = json.load(f)
-                self.orders = state.get('orders', [])
-                print(f"📂 Loaded {len(self.orders)} tracked orders.")
-                return True
-        except:
-            return False
+            with open('bot_state.json', 'r') as f: self.state = json.load(f)
+        except: pass
 
-def main():
-    bot = BitkubGridBot()
-    
-    # โหลด state
-    bot.load_state()
-    
-    # ถ้าไม่มี Order ค้างอยู่เลย ให้เริ่ม Setup ใหม่
-    if not bot.orders:
-        bot.setup_grid()
-    else:
-        bot.check_and_rebalance()
+    def save_state(self):
+        with open('bot_state.json', 'w') as f: json.dump(self.state, f)
+
+    def run(self):
+        self.load_state()
+        rsi, current_price = self.get_rsi()
+        
+        if rsi is None: return
+        
+        print(f"📊 Market Status: RSI={rsi:.2f} | Price={current_price:,.2f}")
+        
+        # --- LOGIC การซื้อขาย ---
+        
+        # 1. ถ้ายังไม่มีของ (ถือเงินสด) -> รอซื้อเมื่อ RSI ต่ำ
+        if not self.state['holding']:
+            if rsi <= self.rsi_buy:
+                msg = f"📉 RSI ต่ำ ({rsi:.2f})! กำลังเข้าซื้อ..."
+                print(msg)
+                self.telegram.send_message(msg)
+                
+                # ซื้อที่ราคาตลาด (หรือบวกนิดหน่อยให้แมทช์เลย)
+                buy_price = current_price * 1.001 
+                res = self.place_order('buy', self.trade_amt, buy_price)
+                
+                if res and res.get('error') == 0:
+                    # คำนวณจำนวนเหรียญที่ได้ (หักค่าธรรมเนียม 0.25% เผื่อไว้)
+                    qty = (self.trade_amt / buy_price) * 0.9975
+                    self.state = {'holding': True, 'buy_price': buy_price, 'qty': qty}
+                    self.save_state()
+                    self.telegram.send_message(f"✅ ซื้อสำเร็จ! @ {buy_price:,.2f} เป้าขาย: {buy_price * (1 + self.tp_percent/100):,.2f}")
+            else:
+                print(f"⏳ รอจังหวะ (RSI > {self.rsi_buy})")
+
+        # 2. ถ้ามีของแล้ว -> รอขายเมื่อกำไรถึงเป้า
+        else:
+            buy_price = self.state['buy_price']
+            target_price = buy_price * (1 + self.tp_percent/100)
+            profit_pct = ((current_price - buy_price) / buy_price) * 100
+            
+            print(f"💰 ถือของอยู่: ทุน {buy_price:,.2f} | ปัจจุบัน {current_price:,.2f} ({profit_pct:+.2f}%)")
+            
+            if current_price >= target_price:
+                msg = f"🤑 กำไรแล้ว ({profit_pct:.2f}%)! ขายทำกำไร..."
+                print(msg)
+                self.telegram.send_message(msg)
+                
+                res = self.place_order('sell', self.state['qty'], current_price)
+                
+                if res and res.get('error') == 0:
+                    self.state = {'holding': False, 'buy_price': 0, 'qty': 0}
+                    self.save_state()
+                    self.telegram.send_message(f"💵 ขายเรียบร้อย! รับกำไรเข้ากระเป๋า")
+            
+            # (Option) ตัดขาดทุนถ้าลงหนักเกิน 5%
+            elif profit_pct < -5.0:
+                 self.telegram.send_message(f"⚠️ ขาดทุนเกิน 5% คัทลอสเพื่อรักษาทุน")
+                 # (ถ้าต้องการให้คัทลอสอัตโนมัติ ให้เพิ่มโค้ด place_order sell ตรงนี้)
 
 if __name__ == '__main__':
-    main()
+    bot = BitkubRSIBot()
+    bot.run()
