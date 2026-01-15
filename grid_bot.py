@@ -21,7 +21,7 @@ class TelegramNotifier:
         except Exception as e:
             print(f"Telegram Error: {e}")
 
-class BitkubRSIBot:
+class BitkubStatelessBot:
     def __init__(self):
         self.api_key = os.environ.get('BITKUB_API_KEY')
         self.api_secret = os.environ.get('BITKUB_API_SECRET')
@@ -30,13 +30,11 @@ class BitkubRSIBot:
         
         # --- ตั้งค่ากลยุทธ์ ---
         self.symbol = os.environ.get('SYMBOL', 'THB_BTC')
-        self.trade_amt = float(os.environ.get('TRADE_AMOUNT', '500'))
-        self.rsi_buy = 30
-        self.tp_percent = 1.5
-        self.timeframe = '15' # 15 นาที
+        self.trade_amt = float(os.environ.get('TRADE_AMOUNT', '330'))
+        self.rsi_buy = 35     # ซื้อถ้าร่วงแรง (RSI ต่ำกว่านี้)
+        self.tp_percent = 1.2 # ขายถ้ากำไรถึงเป้านี้ (%)
+        self.timeframe = '15'
         # --------------------
-        
-        self.state = {'holding': False, 'buy_price': 0, 'qty': 0}
 
     def _get_server_time(self):
         try:
@@ -60,143 +58,167 @@ class BitkubRSIBot:
         except Exception as e:
             return {'error': str(e)}
 
-    def get_rsi(self):
-        """คำนวณ RSI จาก TradingView Endpoint ของ Bitkub"""
+    def get_wallet(self):
+        """เช็คยอดเงินคงเหลือจริง"""
         try:
-            # 1. เตรียม Symbol (Bitkub TradingView ใช้ BTC_THB ตัวใหญ่)
+            res = self._make_request('/api/v3/market/balances', 'POST', {})
+            if res.get('error') != 0: return 0, 0
+            
+            result = res['result']
+            thb = float(result.get('THB', {}).get('available', 0))
+            
+            # หา Symbol ของเหรียญ (ตัด THB ออก)
+            coin_sym = self.symbol.replace('THB_', '').replace('_THB', '').upper()
+            btc = float(result.get(coin_sym, {}).get('available', 0))
+            
+            return thb, btc
+        except:
+            return 0, 0
+
+    def get_last_buy_price(self):
+        """ค้นหาประวัติการซื้อล่าสุด เพื่อหาทุน"""
+        try:
+            sym = self.symbol.lower().replace('thb_', '').replace('_thb', '') + '_thb'
+            if sym.startswith('thb_'): sym = 'btc_thb'
+            
+            payload = {'sym': sym, 'lmt': 10} # ดูย้อนหลัง 10 รายการ
+            res = self._make_request('/api/v3/market/my-order-history', 'POST', payload)
+            
+            if res.get('error') == 0:
+                orders = res['result']
+                for order in orders:
+                    # หาออเดอร์ "Buy" ที่สำเร็จ (Filled) ล่าสุด
+                    if order.get('side') == 'buy':
+                        return float(order.get('rate', 0))
+            return 0
+        except:
+            return 0
+
+    def get_rsi(self):
+        """ดึง RSI จาก TradingView API"""
+        try:
             sym = self.symbol.upper().replace('THB_', '').replace('_THB', '') + '_THB'
             if sym.startswith('THB_'): sym = 'BTC_THB'
             
-            # 2. คำนวณช่วงเวลา (เอา 100 แท่งย้อนหลัง)
             now_ts = int(time.time())
-            # 15 นาที * 60 วินาที * 100 แท่ง
             from_ts = now_ts - (int(self.timeframe) * 60 * 100)
             
-            # 3. เรียก API /tradingview/history
             url = f"{self.base_url}/tradingview/history?symbol={sym}&resolution={self.timeframe}&from={from_ts}&to={now_ts}"
+            data = requests.get(url, timeout=10).json()
             
-            response = requests.get(url, timeout=10)
-            data = response.json()
-            
-            # ตรวจสอบข้อมูล (Format: {s: "ok", c: [close_prices], ...})
-            if data.get('s') != 'ok' or not data.get('c'):
-                print(f"⚠️ No chart data for {sym}: {data}")
-                return None, None
+            if data.get('s') != 'ok' or not data.get('c'): return None, None
             
             closes = [float(c) for c in data['c']]
+            if len(closes) < 15: return None, None
             
-            if len(closes) < 15:
-                print("⚠️ Not enough data for RSI")
-                return None, None
-            
-            # 4. คำนวณ RSI
-            gains = []
-            losses = []
-            # ใช้ข้อมูล 14 แท่งล่าสุด
-            recent_closes = closes[-15:] 
-            
+            # RSI Calculation
+            recent_closes = closes[-15:]
+            gains, losses = [], []
             for i in range(1, len(recent_closes)):
                 change = recent_closes[i] - recent_closes[i-1]
-                if change >= 0:
-                    gains.append(change)
-                    losses.append(0)
-                else:
-                    gains.append(0)
-                    losses.append(abs(change))
+                if change >= 0: gains.append(change); losses.append(0)
+                else: gains.append(0); losses.append(abs(change))
             
             avg_gain = sum(gains) / 14
             avg_loss = sum(losses) / 14
             
-            if avg_loss == 0:
-                rsi = 100
+            if avg_loss == 0: rsi = 100
             else:
                 rs = avg_gain / avg_loss
                 rsi = 100 - (100 / (1 + rs))
             
-            current_price = closes[-1]
-            return rsi, current_price
-            
-        except Exception as e:
-            print(f"❌ RSI Error: {e}")
+            return rsi, closes[-1]
+        except:
             return None, None
 
     def place_order(self, side, val, price):
-        # แปลง Symbol สำหรับ v3 API (ตัวเล็ก btc_thb)
         sym = self.symbol.lower().replace('thb_', '').replace('_thb', '') + '_thb'
         if sym.startswith('thb_'): sym = 'btc_thb'
         
         if side == 'buy':
             endpoint, amt = '/api/v3/market/place-bid', float(val)
         else:
-            endpoint, amt = '/api/v3/market/place-ask', float(f"{val:.8f}") # คำนวณเหรียญมาแล้ว
+            endpoint, amt = '/api/v3/market/place-ask', float(f"{val:.8f}")
 
         payload = {'sym': sym, 'amt': amt, 'rat': float(f"{price:.2f}"), 'typ': 'limit'}
         return self._make_request(endpoint, 'POST', payload)
 
-    def load_state(self):
-        try:
-            with open('bot_state.json', 'r') as f: self.state = json.load(f)
-        except: pass
-
-    def save_state(self):
-        with open('bot_state.json', 'w') as f: json.dump(self.state, f)
-
     def run(self):
-        print("🤖 Bot Started (RSI Strategy)...")
-        self.load_state()
+        print("🤖 Bot Checking (Stateless Mode)...")
         
+        # 1. เช็คข้อมูลตลาด
         rsi, current_price = self.get_rsi()
-        
         if rsi is None:
-            print("❌ Failed to get RSI data. Retrying next round.")
+            print("❌ Error fetching chart.")
             return
-        
-        print(f"📊 Market Status: RSI={rsi:.2f} | Price={current_price:,.2f}")
-        
-        if not self.state['holding']:
-            if rsi <= self.rsi_buy:
-                msg = f"📉 RSI ต่ำ ({rsi:.2f})! กำลังเข้าซื้อ..."
-                print(msg)
-                self.telegram.send_message(msg)
-                
-                # ซื้อที่ราคาตลาด (Market Price) เพื่อให้ได้ของชัวร์
-                buy_price = current_price * 1.002 # เผื่อราคาขยับ 0.2%
-                
-                res = self.place_order('buy', self.trade_amt, buy_price)
-                
-                if res and res.get('error') == 0:
-                    # คำนวณเหรียญที่ได้ (BTC)
-                    qty = (self.trade_amt / buy_price) * 0.9975
-                    self.state = {'holding': True, 'buy_price': buy_price, 'qty': qty}
-                    self.save_state()
-                    self.telegram.send_message(f"✅ ซื้อสำเร็จ! @ {buy_price:,.2f} THB")
-            else:
-                print(f"⏳ รอจังหวะ (RSI > {self.rsi_buy})")
 
-        else:
-            buy_price = self.state.get('buy_price', 0)
-            target_price = buy_price * (1 + self.tp_percent/100)
+        # 2. เช็คกระเป๋าตังค์จริง
+        thb_balance, btc_balance = self.get_wallet()
+        print(f"💰 Wallet: {thb_balance:,.2f} THB | {btc_balance:.8f} BTC")
+        print(f"📊 Market: RSI={rsi:.2f} | Price={current_price:,.2f}")
+
+        # ตรวจสอบว่า "มีของ" หรือไม่ (ถ้ามี BTC มากกว่าเศษสตางค์ ประมาณ 150 บาท)
+        has_position = btc_balance > 0.00005 
+        
+        # --- LOGIC การตัดสินใจ ---
+        
+        if has_position:
+            # === โหมดเตรียมขาย ===
+            last_buy_price = self.get_last_buy_price()
+            if last_buy_price == 0:
+                print("⚠️ มีเหรียญแต่หาประวัติซื้อไม่เจอ ข้ามการขายอัตโนมัติ")
+                return
+
+            target_price = last_buy_price * (1 + self.tp_percent/100)
+            profit_pct = ((current_price - last_buy_price) / last_buy_price) * 100
             
-            if buy_price == 0: profit_pct = 0
-            else: profit_pct = ((current_price - buy_price) / buy_price) * 100
-            
-            print(f"💰 ถือของอยู่: ทุน {buy_price:,.2f} | ปัจจุบัน {current_price:,.2f} ({profit_pct:+.2f}%)")
+            print(f"💎 ถือของอยู่ (ทุน {last_buy_price:,.2f}) กำไร: {profit_pct:+.2f}%")
+            print(f"🎯 เป้าขาย: {target_price:,.2f}")
             
             if current_price >= target_price:
-                msg = f"🤑 กำไรแล้ว ({profit_pct:.2f}%)! ขายทำกำไร..."
+                # แจ้งเตือนการขาย แบบละเอียด
+                msg = (
+                    f"🔴 <b>SELLING NOW!</b>\n\n"
+                    f"💵 <b>Price:</b> {current_price:,.2f} THB\n"
+                    f"📦 <b>Cost:</b> {last_buy_price:,.2f} THB\n"
+                    f"📈 <b>Profit:</b> {profit_pct:+.2f}%"
+                )
                 print(msg)
                 self.telegram.send_message(msg)
                 
-                res = self.place_order('sell', self.state['qty'], current_price)
+                # ขายหมดพอร์ต
+                self.place_order('sell', btc_balance, current_price)
+            else:
+                print("⏳ ยังไม่ถึงเป้า ถือต่อ...")
                 
-                if res and res.get('error') == 0:
-                    self.state = {'holding': False, 'buy_price': 0, 'qty': 0}
-                    self.save_state()
-                    self.telegram.send_message(f"💵 ขายเรียบร้อย! รับกำไรเข้ากระเป๋า")
-            
-            elif profit_pct < -5.0:
-                 self.telegram.send_message(f"⚠️ ขาดทุนเกิน 5% (เตือน)")
+        else:
+            # === โหมดเตรียมซื้อ ===
+            if thb_balance < self.trade_amt:
+                print("⚠️ เงินบาทไม่พอซื้อ")
+                return
+
+            if rsi <= self.rsi_buy:
+                # คำนวณเป้าขายล่วงหน้าเพื่อแจ้งเตือน
+                buy_price = current_price * 1.002
+                future_sell_price = buy_price * (1 + self.tp_percent/100)
+                
+                # แจ้งเตือนการซื้อ แบบละเอียด
+                msg = (
+                    f"🟢 <b>BUYING NOW!</b>\n\n"
+                    f"📉 <b>RSI:</b> {rsi:.2f}\n"
+                    f"💵 <b>Price:</b> {buy_price:,.2f} THB\n"
+                    f"🎯 <b>Target:</b> +{self.tp_percent}%\n"
+                    f"🔮 <b>Sell at:</b> {future_sell_price:,.2f} THB"
+                )
+                print(msg)
+                self.telegram.send_message(msg)
+                
+                # เคาะขวา ซื้อเลย
+                self.place_order('buy', self.trade_amt, buy_price)
+            else:
+                print(f"👀 เฝ้ารอ (RSI {rsi:.2f} > {self.rsi_buy})")
 
 if __name__ == '__main__':
-    bot = BitkubRSIBot()
+    bot = BitkubStatelessBot()
     bot.run()
+                
